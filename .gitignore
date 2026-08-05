@@ -1,0 +1,7 @@
+/bin/
+*.pcap
+*.pcapng
+.DS_Store
+
+# Go tooling
+coverage.out

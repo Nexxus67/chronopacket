@@ -15,3 +15,25 @@ func TestConfigValidate(t *testing.T) {
 		}
 	}
 }
+
+func TestDryRunDoesNotRequireInterface(t *testing.T) {
+	cfg := Config{PCAPPath: "capture.pcap", Speed: 1, DryRun: true}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("dry run without an interface: %v", err)
+	}
+	cfg.DryRun = false
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("replay without an interface must fail")
+	}
+}
+
+func TestFilterIsOptional(t *testing.T) {
+	cfg := Config{PCAPPath: "capture.pcap", Interface: "eth0", Speed: 1}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty filter must be accepted: %v", err)
+	}
+	cfg.Filter = "tcp port 443"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("filter expression must be accepted: %v", err)
+	}
+}

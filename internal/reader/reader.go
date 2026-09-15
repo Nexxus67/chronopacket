@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
@@ -50,6 +51,9 @@ func (r *PcapReader) Read() (Packet, error) {
 	data := append([]byte(nil), p.Data()...)
 	return Packet{Data: data, Timestamp: p.Metadata().Timestamp}, nil
 }
+
+// LinkType reports the capture link layer, needed to compile filters and decode packets.
+func (r *PcapReader) LinkType() layers.LinkType { return r.handle.LinkType() }
 
 // Close releases the underlying libpcap handle.
 func (r *PcapReader) Close() error { r.handle.Close(); return nil }

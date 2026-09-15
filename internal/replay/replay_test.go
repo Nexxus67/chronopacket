@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chronopacket/chronopacket/internal/filter"
 	"github.com/chronopacket/chronopacket/internal/reader"
 )
 
@@ -95,3 +96,40 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 		t.Fatal("expected invalid speed error")
 	}
 }
+
+func TestEnginePreservesTimingAcrossFilteredPackets(t *testing.T) {
+	base := time.Unix(100, 0)
+	input := &fakeReader{packets: []reader.Packet{
+		{Data: []byte("a"), Timestamp: base},
+		{Data: []byte("b"), Timestamp: base.Add(time.Second)},
+		{Data: []byte("c"), Timestamp: base.Add(5 * time.Second)},
+	}}
+	output := &fakeSender{}
+	sleeper := &fakeSleeper{}
+	engine, err := New(Options{
+		Reader:  filter.NewReader(input, dropMiddle{}),
+		Sender:  output,
+		Sleeper: sleeper,
+		Speed:   5,
+		Clock:   func() time.Time { return base },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(output.packets) != 2 {
+		t.Fatalf("sent %d packets, want 2", len(output.packets))
+	}
+	// The gap must span the filtered packet: 5s of capture time at 5x speed.
+	if len(sleeper.waits) != 1 || sleeper.waits[0] != time.Second {
+		t.Fatalf("waits = %v, want [1s]", sleeper.waits)
+	}
+}
+
+// dropMiddle rejects the single packet carrying payload "b".
+type dropMiddle struct{}
+
+func (dropMiddle) Matches(p reader.Packet) bool { return string(p.Data) != "b" }
+func (dropMiddle) String() string               { return "not b" }

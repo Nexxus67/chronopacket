@@ -8,6 +8,8 @@ type Config struct {
 	PCAPPath  string
 	Interface string
 	Speed     float64
+	Filter    string
+	DryRun    bool
 }
 
 // Validate checks that the replay configuration is complete and supported.
@@ -15,7 +17,7 @@ func (c Config) Validate() error {
 	if c.PCAPPath == "" {
 		return fmt.Errorf("pcap path is required")
 	}
-	if c.Interface == "" {
+	if c.Interface == "" && !c.DryRun {
 		return fmt.Errorf("network interface is required")
 	}
 	if c.Speed != 1 && c.Speed != 2 && c.Speed != 5 && c.Speed != 10 {

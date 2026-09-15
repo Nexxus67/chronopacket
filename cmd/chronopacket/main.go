@@ -12,6 +12,8 @@ import (
 	"syscall"
 
 	"github.com/chronopacket/chronopacket/internal/config"
+	"github.com/chronopacket/chronopacket/internal/filter"
+	"github.com/chronopacket/chronopacket/internal/inspect"
 	"github.com/chronopacket/chronopacket/internal/logging"
 	"github.com/chronopacket/chronopacket/internal/reader"
 	"github.com/chronopacket/chronopacket/internal/replay"
@@ -31,10 +33,12 @@ func run(args []string, output, errOutput io.Writer) error {
 	pcapPath := flags.String("pcap", "", "path to a libpcap capture")
 	iface := flags.String("iface", "", "network interface to transmit through")
 	speed := flags.Float64("speed", 1, "replay speed multiplier: 1, 2, 5, or 10")
+	filterExpr := flags.String("filter", "", "optional libpcap/BPF expression selecting packets to replay")
+	dryRun := flags.Bool("dry-run", false, "inspect matching packets without transmitting anything")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg := config.Config{PCAPPath: *pcapPath, Interface: *iface, Speed: *speed}
+	cfg := config.Config{PCAPPath: *pcapPath, Interface: *iface, Speed: *speed, Filter: *filterExpr, DryRun: *dryRun}
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -44,18 +48,36 @@ func run(args []string, output, errOutput io.Writer) error {
 		return err
 	}
 	defer input.Close()
+	matcher, err := filter.New(input.LinkType(), cfg.Filter)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if cfg.DryRun {
+		summary, err := inspect.Run(ctx, inspect.Options{Reader: input, Matcher: matcher, LinkType: input.LinkType(), Output: output})
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return errors.New("inspection interrupted")
+			}
+			return err
+		}
+		inspect.WriteSummary(output, summary)
+		return nil
+	}
+
 	outputSender, err := sender.NewInterfaceSender(cfg.Interface)
 	if err != nil {
 		return err
 	}
 	defer outputSender.Close()
 	reporter := logging.NewProgressReporter(output, cfg.Speed)
-	engine, err := replay.New(replay.Options{Reader: input, Sender: outputSender, Speed: cfg.Speed, Reporter: reporter})
+	engine, err := replay.New(replay.Options{Reader: filter.NewReader(input, matcher), Sender: outputSender, Speed: cfg.Speed, Reporter: reporter})
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	stats, err := engine.Run(ctx)
 	reporter.Finish()
 	if err != nil {

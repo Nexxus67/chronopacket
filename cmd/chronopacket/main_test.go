@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -82,5 +84,114 @@ func TestMissingPCAPFails(t *testing.T) {
 	var output, errOutput bytes.Buffer
 	if err := run([]string{"--dry-run"}, &output, &errOutput); err == nil {
 		t.Fatal("expected missing --pcap to fail")
+	}
+}
+
+func TestDryRunShowsRewrittenAddresses(t *testing.T) {
+	var output, errOutput bytes.Buffer
+	args := []string{"--pcap", fixture(t), "--dry-run", "--map-ip", "192.168.1.10=10.99.0.1"}
+	if err := run(args, &output, &errOutput); err != nil {
+		t.Fatalf("dry run: %v (stderr: %s)", err, errOutput.String())
+	}
+	text := output.String()
+	packets, summary, _ := strings.Cut(text, "inspected:")
+	if !strings.Contains(packets, "10.99.0.1") {
+		t.Errorf("rewritten address missing:\n%s", text)
+	}
+	// The summary echoes the rule, so only the packet lines may be checked here.
+	if strings.Contains(packets, "192.168.1.10") {
+		t.Errorf("original address still printed:\n%s", text)
+	}
+	if !strings.Contains(summary, "rewrite:   ip 192.168.1.10=10.99.0.1") {
+		t.Errorf("summary missing the rewrite line:\n%s", text)
+	}
+}
+
+// TestFilterMatchesCaptureAddressesNotRewrittenOnes pins the stage order: the
+// filter sees the capture as recorded, so an expression written against the
+// original addresses still selects the packets the user then relocates.
+func TestFilterMatchesCaptureAddressesNotRewrittenOnes(t *testing.T) {
+	var output, errOutput bytes.Buffer
+	args := []string{"--pcap", fixture(t), "--dry-run", "--filter", "host 192.168.1.10", "--map-ip", "192.168.1.10=10.99.0.1"}
+	if err := run(args, &output, &errOutput); err != nil {
+		t.Fatalf("dry run: %v (stderr: %s)", err, errOutput.String())
+	}
+	text := output.String()
+	if !strings.Contains(text, "matched:   2 packets") {
+		t.Errorf("filter should still match both packets:\n%s", text)
+	}
+	if !strings.Contains(text, "10.99.0.1") {
+		t.Errorf("matched packets should be printed rewritten:\n%s", text)
+	}
+}
+
+func TestDryRunEmitsNewlineDelimitedJSON(t *testing.T) {
+	var output, errOutput bytes.Buffer
+	if err := run([]string{"--pcap", fixture(t), "--dry-run", "--format", "json"}, &output, &errOutput); err != nil {
+		t.Fatalf("dry run: %v (stderr: %s)", err, errOutput.String())
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines = %d, want two packets and a summary:\n%s", len(lines), output.String())
+	}
+	for index, line := range lines {
+		var object map[string]any
+		if err := json.Unmarshal([]byte(line), &object); err != nil {
+			t.Fatalf("line %d is not JSON: %v", index+1, err)
+		}
+		want := "packet"
+		if index == len(lines)-1 {
+			want = "summary"
+		}
+		if object["type"] != want {
+			t.Errorf("line %d type = %v, want %v", index+1, object["type"], want)
+		}
+	}
+}
+
+func TestDryRunEmitsCSVOnStdoutAndTheSummaryOnStderr(t *testing.T) {
+	var output, errOutput bytes.Buffer
+	if err := run([]string{"--pcap", fixture(t), "--dry-run", "--format", "csv"}, &output, &errOutput); err != nil {
+		t.Fatalf("dry run: %v (stderr: %s)", err, errOutput.String())
+	}
+	rows, err := csv.NewReader(&output).ReadAll()
+	if err != nil {
+		t.Fatalf("stdout is not valid CSV: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows = %d, want a header plus two packets:\n%v", len(rows), rows)
+	}
+	if rows[0][0] != "number" {
+		t.Errorf("first row = %v, want a header", rows[0])
+	}
+	if !strings.Contains(errOutput.String(), "inspected: 2 packets") {
+		t.Errorf("summary missing from stderr:\n%s", errOutput.String())
+	}
+}
+
+func TestInvalidRewriteFailsBeforeReplay(t *testing.T) {
+	var output, errOutput bytes.Buffer
+	// As with the filter test, --iface is bogus: a rewrite error proves the flag
+	// is parsed before any sender is opened.
+	err := run([]string{"--pcap", fixture(t), "--iface", "definitely-not-an-interface", "--map-ip", "192.168.1.10"}, &output, &errOutput)
+	if err == nil {
+		t.Fatal("expected an error for a malformed --map-ip value")
+	}
+	if !strings.Contains(err.Error(), "192.168.1.10") {
+		t.Fatalf("error = %v, want it to name the invalid value", err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("no output expected, got:\n%s", output.String())
+	}
+}
+
+func TestUnknownFormatFails(t *testing.T) {
+	var output, errOutput bytes.Buffer
+	err := run([]string{"--pcap", fixture(t), "--dry-run", "--format", "yaml"}, &output, &errOutput)
+	if err == nil {
+		t.Fatal("expected an error for an unsupported --format")
+	}
+	if !strings.Contains(err.Error(), "yaml") {
+		t.Fatalf("error = %v, want it to name the format", err)
 	}
 }

@@ -4,45 +4,43 @@ package inspect
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"time"
 
 	"github.com/chronopacket/chronopacket/internal/filter"
+	"github.com/chronopacket/chronopacket/internal/output"
 	"github.com/chronopacket/chronopacket/internal/reader"
+	"github.com/chronopacket/chronopacket/internal/rewrite"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
-
-// Summary contains the totals reported after an inspection.
-type Summary struct {
-	Inspected uint64
-	Matched   uint64
-	Bytes     uint64
-	Duration  time.Duration
-	Filter    string
-}
 
 // Options configures an inspection run.
 type Options struct {
 	Reader   reader.Reader
 	Matcher  filter.Matcher
+	Rewriter rewrite.Rewriter
 	LinkType layers.LinkType
-	Output   io.Writer
+	Writer   output.Writer
 }
 
-// Run reads the whole capture, prints one line per matching packet, and returns
+// Run reads the whole capture, emits one record per matching packet, and returns
 // the totals. It never sends packets and never waits for capture timestamps.
-func Run(ctx context.Context, opts Options) (Summary, error) {
+// Rewriting is applied after matching, so records show the addresses a replay
+// with the same flags would actually put on the wire.
+func Run(ctx context.Context, opts Options) (output.Summary, error) {
 	if opts.Reader == nil {
-		return Summary{}, errors.New("inspect reader is required")
+		return output.Summary{}, errors.New("inspect reader is required")
 	}
 	if opts.Matcher == nil {
 		opts.Matcher = filter.MatchAll{}
 	}
-	summary := Summary{Filter: opts.Matcher.String()}
+	if opts.Rewriter == nil {
+		opts.Rewriter = rewrite.NoOp{}
+	}
+	summary := output.Summary{Filter: opts.Matcher.String(), Rewrite: opts.Rewriter.String()}
 	var first, last time.Time
 	for {
 		if err := ctx.Err(); err != nil {
@@ -64,17 +62,26 @@ func Run(ctx context.Context, opts Options) (Summary, error) {
 		if !opts.Matcher.Matches(packet) {
 			continue
 		}
-		summary.Matched++
+		rewritten, err := opts.Rewriter.Rewrite(&packet)
+		if err != nil {
+			return summary, err
+		}
+		summary.Packets++
 		summary.Bytes += uint64(len(packet.Data))
-		if opts.Output != nil {
-			fmt.Fprintln(opts.Output, Describe(summary.Matched, packet.Timestamp.Sub(first), packet, opts.LinkType))
+		if opts.Writer == nil {
+			continue
+		}
+		record := Describe(summary.Packets, packet.Timestamp.Sub(first), packet, opts.LinkType)
+		record.Rewritten = rewritten
+		if err := opts.Writer.WriteRecord(record); err != nil {
+			return summary, err
 		}
 	}
 }
 
-// Describe formats one packet as a compact, human-readable line. Packets whose
-// layers cannot be decoded degrade to placeholders instead of failing.
-func Describe(number uint64, offset time.Duration, packet reader.Packet, linkType layers.LinkType) string {
+// Describe decodes one packet into a renderable record. Packets whose layers
+// cannot be decoded degrade to placeholders instead of failing.
+func Describe(number uint64, offset time.Duration, packet reader.Packet, linkType layers.LinkType) output.Record {
 	decoded := gopacket.NewPacket(packet.Data, linkType, gopacket.DecodeOptions{Lazy: true, NoCopy: true})
 	protocol := "?"
 	source, destination := "?", "?"
@@ -97,7 +104,14 @@ func Describe(number uint64, offset time.Duration, packet reader.Packet, linkTyp
 			protocol = transport.LayerType().String()
 		}
 	}
-	return fmt.Sprintf("#%-5d +%.3fs  %-5s %-24s -> %-24s %d bytes", number, offset.Seconds(), protocol, source, destination, len(packet.Data))
+	return output.Record{
+		Number:      number,
+		Offset:      offset,
+		Protocol:    protocol,
+		Source:      source,
+		Destination: destination,
+		Bytes:       len(packet.Data),
+	}
 }
 
 // address renders an endpoint, falling back to a placeholder when it is empty.
@@ -107,19 +121,4 @@ func address(endpoint gopacket.Endpoint) string {
 		return "?"
 	}
 	return text
-}
-
-// WriteSummary prints the closing inspection totals.
-func WriteSummary(output io.Writer, summary Summary) {
-	fmt.Fprintf(output, "inspected: %d packets\n", summary.Inspected)
-	if summary.Filter == "" {
-		fmt.Fprintf(output, "matched:   %d packets (no filter, all packets matched)\n", summary.Matched)
-	} else {
-		fmt.Fprintf(output, "matched:   %d packets\n", summary.Matched)
-	}
-	fmt.Fprintf(output, "bytes:     %d\n", summary.Bytes)
-	fmt.Fprintf(output, "duration:  %s\n", summary.Duration.Round(time.Millisecond))
-	if summary.Filter != "" {
-		fmt.Fprintf(output, "filter:    %s\n", summary.Filter)
-	}
 }

@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/chronopacket/chronopacket/internal/output"
+)
 
 func TestConfigValidate(t *testing.T) {
 	valid := Config{PCAPPath: "capture.pcap", Interface: "eth0", Speed: 2}
@@ -35,5 +39,34 @@ func TestFilterIsOptional(t *testing.T) {
 	cfg.Filter = "tcp port 443"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("filter expression must be accepted: %v", err)
+	}
+}
+
+func TestFormatDefaultsToTextAndRejectsUnknownNames(t *testing.T) {
+	cfg := Config{PCAPPath: "capture.pcap", Interface: "eth0", Speed: 1}
+	format, err := cfg.OutputFormat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != output.FormatText {
+		t.Errorf("default format = %q, want text", format)
+	}
+	for _, name := range []string{"text", "json", "csv"} {
+		cfg.Format = name
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("format %q: %v", name, err)
+		}
+	}
+	cfg.Format = "yaml"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected an unsupported format to fail validation")
+	}
+}
+
+func TestRewriteFlagsAreOptional(t *testing.T) {
+	cfg := Config{PCAPPath: "capture.pcap", Interface: "eth0", Speed: 1,
+		MapIP: []string{"10.0.0.1=10.0.0.2"}, MapMAC: []string{"aa:bb:cc:dd:ee:ff=02:00:00:00:00:01"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("rewrite flags must be accepted: %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/chronopacket/chronopacket/internal/filter"
+	"github.com/chronopacket/chronopacket/internal/output"
 	"github.com/chronopacket/chronopacket/internal/reader"
 	"github.com/chronopacket/chronopacket/internal/testcapture"
 	"github.com/google/gopacket/layers"
@@ -31,6 +32,16 @@ func (r *staticReader) Read() (reader.Packet, error) {
 }
 func (r *staticReader) Close() error { r.closed = true; return nil }
 
+// textWriter renders records into buffer using the default terminal format.
+func textWriter(t *testing.T, buffer io.Writer) output.Writer {
+	t.Helper()
+	writer, err := output.NewWriter(buffer, io.Discard, output.FormatText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writer
+}
+
 func fixture(t *testing.T) string {
 	t.Helper()
 	return testcapture.Write(t,
@@ -47,12 +58,12 @@ func TestRunDescribesEveryPacketWithoutAFilter(t *testing.T) {
 	}
 	defer source.Close()
 	var output bytes.Buffer
-	summary, err := Run(context.Background(), Options{Reader: source, LinkType: source.LinkType(), Output: &output})
+	summary, err := Run(context.Background(), Options{Reader: source, LinkType: source.LinkType(), Writer: textWriter(t, &output)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Inspected != 3 || summary.Matched != 3 {
-		t.Fatalf("inspected=%d matched=%d, want 3/3", summary.Inspected, summary.Matched)
+	if summary.Inspected != 3 || summary.Packets != 3 {
+		t.Fatalf("inspected=%d matched=%d, want 3/3", summary.Inspected, summary.Packets)
 	}
 	if summary.Duration != 5*time.Second {
 		t.Fatalf("duration = %v, want 5s", summary.Duration)
@@ -87,12 +98,12 @@ func TestRunCountsFilteredPacketsSeparately(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	summary, err := Run(context.Background(), Options{Reader: source, Matcher: matcher, LinkType: source.LinkType(), Output: &output})
+	summary, err := Run(context.Background(), Options{Reader: source, Matcher: matcher, LinkType: source.LinkType(), Writer: textWriter(t, &output)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Inspected != 3 || summary.Matched != 2 {
-		t.Fatalf("inspected=%d matched=%d, want 3/2", summary.Inspected, summary.Matched)
+	if summary.Inspected != 3 || summary.Packets != 2 {
+		t.Fatalf("inspected=%d matched=%d, want 3/2", summary.Inspected, summary.Packets)
 	}
 	if summary.Filter != "tcp port 443" {
 		t.Fatalf("filter = %q", summary.Filter)
@@ -101,7 +112,9 @@ func TestRunCountsFilteredPacketsSeparately(t *testing.T) {
 		t.Fatalf("filtered packet was printed:\n%s", output.String())
 	}
 	var rendered bytes.Buffer
-	WriteSummary(&rendered, summary)
+	if err := textWriter(t, &rendered).WriteSummary(summary); err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{"inspected: 3 packets", "matched:   2 packets", "filter:    tcp port 443", "bytes:"} {
 		if !strings.Contains(rendered.String(), want) {
 			t.Errorf("summary missing %q:\n%s", want, rendered.String())
@@ -116,24 +129,25 @@ func TestRunDoesNotWaitForCaptureTimestamps(t *testing.T) {
 		{Data: []byte{0x03}, Timestamp: base.Add(time.Hour)},
 	}}
 	started := time.Now()
-	summary, err := Run(context.Background(), Options{Reader: source, LinkType: layers.LinkTypeEthernet, Output: io.Discard})
+	summary, err := Run(context.Background(), Options{Reader: source, LinkType: layers.LinkTypeEthernet, Writer: textWriter(t, io.Discard)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("inspection took %v; it must not honor capture timing", elapsed)
 	}
-	if summary.Matched != 2 || summary.Bytes != 3 || summary.Duration != time.Hour {
+	if summary.Packets != 2 || summary.Bytes != 3 || summary.Duration != time.Hour {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 }
 
 func TestDescribeDegradesOnUndecodablePackets(t *testing.T) {
-	line := Describe(7, 250*time.Millisecond, reader.Packet{Data: []byte{0xff, 0xfe}}, layers.LinkTypeEthernet)
-	for _, want := range []string{"#7", "+0.250s", "?", "2 bytes"} {
-		if !strings.Contains(line, want) {
-			t.Fatalf("line %q missing %q", line, want)
-		}
+	record := Describe(7, 250*time.Millisecond, reader.Packet{Data: []byte{0xff, 0xfe}}, layers.LinkTypeEthernet)
+	if record.Number != 7 || record.Offset != 250*time.Millisecond || record.Bytes != 2 {
+		t.Fatalf("unexpected record: %+v", record)
+	}
+	if record.Protocol != "?" || record.Source != "?" || record.Destination != "?" {
+		t.Fatalf("undecodable packet should use placeholders: %+v", record)
 	}
 }
 
